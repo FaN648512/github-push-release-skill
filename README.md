@@ -7,6 +7,8 @@
 [![Platform](https://img.shields.io/badge/platform-agnostic-green.svg)](https://github.com)
 [![Auth](https://img.shields.io/badge/auth-wincred--auto-green.svg)](https://github.com)
 [![Workflow](https://img.shields.io/badge/workflow-research%20%E2%86%92%20README%20%E2%86%92%20push-orange.svg)](https://github.com)
+[![Python](https://img.shields.io/badge/python-3.x%20stdlib%20only-blue.svg)](https://github.com)
+[![Verified](https://img.shields.io/badge/consistency-verified-brightgreen.svg)](https://github.com)
 
 ---
 
@@ -26,8 +28,11 @@
 |------|------|
 | **零明文凭据** | 自动从 Windows 凭据管理器（`wincred`）读取 GitHub token，全程不落盘，无需手动粘贴 PAT |
 | **绕过沙箱封锁** | 当 `github.com:443` 的 Git 协议端口不可用时，自动改用 GitHub Git Data / Contents / Releases REST API 完成等效推送 |
-| **空仓库引导** | 新建仓库无法直接建 blob（409），自动用 Contents API 建立 `main` 分支后再推代码 |
-| **密钥安全红线** | 仅推送 `git ls-files` 跟踪文件，**自动尊重 `.gitignore`**，含密钥的文件（如 `config.json`、`.env`）绝不会进公开仓库 |
+| **中文路径安全** | 关闭 `core.quotepath` 并用 `-z` 取文件列表，配合"文件必须存在"硬断言，杜绝中文名文件被**静默丢弃** |
+| **推送后自动核验** | 逐文件比对本地 git blob sha 与远程 tree 的 blob sha，直接给出「一致 / 仅本地 / 仅远程 / 哈希不同」结论 |
+| **敏感文件闸门** | 命中 `.env` / `token` / `password` / `id_rsa` / `.pem` / `.workbuddy` 一律中止；`.exe` / `.zip` 等二进制需 `--allow-binary` 显式放行 |
+| **空仓库引导** | 新建仓库无法直接建 blob（409），自动用 Contents API 建立 `main` 分支，推完再清掉占位文件 |
+| **幂等发布** | Release 已存在则复用，附件已上传则跳过，重复执行不报错 |
 | **附件名 ASCII 化** | Release 附件名统一 ASCII，规避中文名在 `uploads.github.com` 上传时丢失的问题 |
 | **可复用工作流** | 封装为 Skill 后，对任意项目一句话即可触发，内置全部踩坑经验 |
 
@@ -43,7 +48,7 @@ github-push-release/
 │   └── push_repo.py    # 推送引擎（GitHub REST API，绕过 git 端口封锁）
 └── references/
     ├── readme-guide.md # 竞品研究方法 + README 最佳结构模板 + UI 审美落地方向
-    └── notes.md        # 沙箱 git 端口封锁等踩坑笔记
+    └── notes.md        # 全部踩坑笔记（改脚本前必读）
 ```
 
 ---
@@ -73,7 +78,7 @@ github-push-release/
 │   └── push_repo.py    # 推送引擎（GitHub REST API，仅 Python 标准库）
 └── references/
     ├── readme-guide.md # 竞品研究方法 + README 最佳结构模板
-    └── notes.md        # 沙箱 git 端口封锁等踩坑笔记
+    └── notes.md        # 全部踩坑笔记
 ```
 
 ### 2. 放置到对应智能体的 skills 目录（路径规范）
@@ -139,10 +144,25 @@ python scripts/push_repo.py \
   --path <项目目录> \
   [--private] \
   [--release v1.0.0] \
-  [--asset <附件路径>] \
+  [--asset <附件1>] [--asset <附件2>] ... \
+  [--release-body-file <md 文件>] \
+  [--description "仓库描述"] [--topics a,b,c] \
   [--message "提交说明"] \
-  [--branch main]
+  [--branch main] \
+  [--allow-binary] [--no-verify]
 ```
+
+| 参数 | 作用 |
+|------|------|
+| `--repo` / `--path` | 仓库名 / 项目目录（默认当前目录） |
+| `--private` | 建为私有仓库（默认公开） |
+| `--description` / `--topics` | 设置仓库描述、topics（逗号分隔） |
+| `--release` | 版本标签，如 `v1.0.0`；已存在则复用（幂等） |
+| `--asset` | Release 附件，**可重复传入多个**；建议 ASCII 命名 |
+| `--release-body` / `--release-body-file` | Release 说明正文 / 从 UTF-8 文件读取（长中文建议用文件） |
+| `--message` | 提交说明 |
+| `--allow-binary` | 允许提交 `.exe` / `.zip` 等二进制（默认中止） |
+| `--no-verify` | 跳过推送后的一致性核验（默认开启核验） |
 
 示例：
 
@@ -150,20 +170,128 @@ python scripts/push_repo.py \
 # 新建公开仓库并推送当前目录代码
 python scripts/push_repo.py --repo my-project --path .
 
-# 推送并发布 v1.0.0 Release，附带源码包附件
+# 推送并发布 v1.0.0 Release，附带多个附件 + 设置 topics
 python scripts/push_repo.py --repo my-project --path . \
-  --release v1.0.0 --asset dist/my-project.zip --message "Release v1.0.0"
+  --release v1.0.0 \
+  --asset dist/my-project.zip --asset dist/my-project.exe \
+  --description "一句话说清这是什么" \
+  --topics windows,cli,utility \
+  --message "feat: v1.0.0 首发"
 ```
 
 ---
 
-## 前置条件
+## 工作原理
 
-- **Python 3**：仅用标准库（`argparse` / `urllib` / `subprocess` / `base64`），无需第三方包。
-- **GitHub 凭据**：本机 Windows 凭据管理器已缓存 `github.com` 条目（需 `repo` 写权限）。
-  若未缓存，脚本会报错退出，此时需手动提供 PAT（仅本次内存使用，不落盘）。
-- **网络**：需能访问 `api.github.com` 与 `uploads.github.com`（端口 443）。
-  若 `github.com` 的 Git 协议端口被封，本脚本的 REST API 路径仍可正常工作。
+核心是**用 Git Data API 手工走一遍 `git push` 的等价流程**：
+
+```mermaid
+flowchart LR
+    A["读取 wincred token"] --> B{"仓库存在?"}
+    B -- 否 --> C["POST /user/repos<br/>建仓库 + 描述 + topics"]
+    B -- 是 --> D{"分支存在?"}
+    C --> D
+    D -- 否 --> E["PUT /contents/.gitkeep<br/>空仓库引导"]
+    D -- 是 --> F["GET /git/commits/{sha}<br/>取 tree SHA"]
+    E --> F
+    F --> G["敏感闸门<br/>密钥/二进制检查"]
+    G --> H["POST /git/blobs<br/>逐文件上传"]
+    H --> I["POST /git/trees<br/>base_tree=tree SHA"]
+    I --> J["POST /git/commits"]
+    J --> K["PATCH /git/refs/heads/main"]
+    K --> L["可选：发布 Release<br/>上传附件"]
+    L --> M["核验：本地 blob sha<br/>vs 远程 tree sha"]
+```
+
+---
+
+## 常见问题
+
+<details>
+<summary><b>推送日志说"待推送 23 个"，但远程只有 9 个文件？</b></summary>
+
+中文文件名被静默丢弃了。git 默认会把中文路径转义成 `\344\275\277...`，
+按这个转义串去读文件必然失败。本脚本已用
+`git -c core.quotepath=false ls-files -z` 修复，并加了"文件必须存在就中止"的硬断言。
+详见 `references/notes.md` 第三条。
+</details>
+
+<details>
+<summary><b>报 <code>422 GitRPC::BadObjectState</code>？</b></summary>
+
+两种原因，脚本均已内置修法：
+① `base_tree` 传成了 commit SHA（应传 tree SHA）；
+② 在 tree 里删除一个**远程已不存在**的路径（如已被清掉的 `.gitkeep`）。
+</details>
+
+<details>
+<summary><b>核验显示个别文件"哈希不同"，但内容看起来一样？</b></summary>
+
+几乎一定是换行符问题。文件在磁盘上是 CRLF，而 `.gitattributes` 声明了
+`* text=auto eol=lf`——本地 git 入库时规范化成了 LF，而脚本按磁盘原始字节上传。
+把磁盘文件统一为 LF 再推即可。详见 `references/notes.md` 第七条。
+</details>
+
+<details>
+<summary><b>附件上传后名字变成孤立下划线？</b></summary>
+
+`uploads.github.com` 对非 ASCII 附件名支持不佳，统一用 ASCII：
+`ScreenOff-portable-v1.0.0.zip` 而不是 `关闭屏幕-绿色版.zip`。
+</details>
+
+<details>
+<summary><b>WebFetch 查到远程还留着已删除的文件？</b></summary>
+
+WebFetch 有约 15 分钟结果缓存，会返回*旧*的 tree。核验文件树请直连 API：
+`GET /repos/{o}/{r}/git/trees/{branch}?recursive=1`。
+</details>
+
+<details>
+<summary><b><code>git credential fill</code> 卡住不动 / 报找不到凭据？</b></summary>
+
+该命令在无交互环境下偶发长时间阻塞，超时值需给到 90 秒（30 秒会误判成"没凭据"）。
+脚本已按 90 秒处理。
+</details>
+
+<details>
+<summary><b>可以从 <code>raw.githubusercontent.com</code> 拉文件但偶尔连接被重置？</b></summary>
+
+网络抖动（`WinError 10054`）。改用 `api.github.com/repos/.../contents/{path}`
+配合 `Accept: application/vnd.github.raw`，比 raw 域名稳定，并加重试。
+</details>
+
+---
+
+## 实战验证
+
+本脚本已在真实项目上端到端跑通并留档：
+
+| 项目 | 结果 |
+|------|------|
+| [`screen-off`](https://github.com/FaN648512/screen-off) | 23 个文件（含 6 个中文名文件）逐字节一致，Release v1.0.0 挂 3 个附件 |
+| `github-push-release` 自身 | 用本脚本完成自我更新（含中文文档与 references） |
+
+一致性核验的判定标准：本地 `git ls-files -s` 的 blob SHA 与远程
+`GET /git/trees/{branch}?recursive=1` 返回的 blob SHA **全部相等**。
+
+---
+
+## 路线图
+
+- [x] Git Data API 等效推送（blob → tree → commit → ref）
+- [x] 空仓库引导 + 占位文件自动清理
+- [x] 多附件发布、幂等 Release、topics / description
+- [x] 敏感文件闸门 + 中文路径安全 + 推送后自动核验
+- [ ] 支持 Git LFS 大文件（当前建议走 Release 附件）
+- [ ] 推送前本地 README Markdown lint 检查
+- [ ] 可选：推送结果生成 Markdown 报告卡片
+
+---
+
+## 贡献
+
+欢迎 Issue / PR。改动 `scripts/push_repo.py` 前请先读 `references/notes.md`，
+那里记录了每一个坑的成因与修法——**不要把已修的 bug 改回去**。
 
 ---
 

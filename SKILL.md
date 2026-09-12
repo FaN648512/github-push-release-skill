@@ -24,10 +24,15 @@ agent_created: true
 1. **密钥安全红线**：绝不可把含密钥的文件（如 `config.json`、`.env`）推送到公开仓库。
    确认项目根目录有 `.gitignore` 并已排除密钥与运行时数据（`history.json`、`__pycache__`、`*.zip` 等）。
    若没有，先生成一个最小 `.gitignore` 再继续。
+   （推送脚本另有一道闸门：命中 `.env` / `token` / `password` / `id_rsa` / `.pem` / `.workbuddy`
+   等关键词一律中止，不可放行。）
 2. **token 可用性**：本机 Windows 凭据管理器（wincred）应已缓存 `github.com` 条目（含 `repo` 权限）。
    推送脚本会自动读取，无需用户提供明文 PAT。若读取失败，再向用户索取 PAT（仅本次内存使用，不落盘）。
 3. **仓库目标**：确认仓库名（默认从当前项目目录名推断）与可见性（公开/私有）。
-   决策可用 AskUserQuestion 向用户确认：仓库名、是否新建、Release 是否含附件、版本标签。
+   决策可用 AskUserQuestion 向用户确认：仓库名、是否新建、Release 是否含附件、版本标签、
+   **二进制文件走 Release 附件还是提交进仓库**。
+4. **换行符**：确认项目有 `.gitattributes`（如 `* text=auto eol=lf`，`.bat` 用 `eol=crlf`），
+   并把磁盘上的文本文件统一为 LF —— 否则本地 git 与远程 blob 的 sha 会对不上（见 `references/notes.md` 第七条）。
 
 ---
 
@@ -38,12 +43,13 @@ agent_created: true
 - 用 `WebSearch` 检索同类标杆（音频转写/语音识别/实时字幕类可参考 MacWhisper、WhisperX、
   realtime-captions、desktop-audio-to-text、TMSpeech、Buzz、OBS 字幕插件等；
   其他品类则检索该品类 Top 3 开源/商业产品）。
-- 至少覆盖 3 个案例，逐一记录：
+- 至少覆盖 3 个案例（建议 5 个），逐一记录：
   - **核心优势**（它解决了什么痛点、凭什么好用）
   - **特色亮点**（差异化功能点）
   - **UI 审美**（极简/毛玻璃/iOS 风/终端式/悬浮字幕等，配色与版式取向）
+  - **它做对了什么**——一条可直接搬到本项目 README 的写法或设计
 - 归纳出**本项目的差异化定位**：我们的工具相对这些标杆，独特卖点是什么
-  （例如：双引擎兜底、iOS 毛玻璃界面、自动断句时间戳、历史卡片）。
+  （例如：零依赖绿色 exe、双引擎兜底、逐窗口投递与广播双重兜底、中文文档全覆盖）。
 - 产出一段简短的「竞品分析小结」供后续 README 与用户参考。
 
 > 详细方法见 `references/readme-guide.md`。
@@ -56,12 +62,15 @@ agent_created: true
    确保 README 写的是真实功能，不夸大、不虚构。
 2. **按最佳实践结构重写**（详见 `references/readme-guide.md` 的模板）：
    - 顶部 shields 徽章（平台 / 引擎 / UI / 语言 / 离线 / 许可证）+ 一句话中英双语定位
-   - 导航目录 → 项目简介 → **核心优势（表格）** → 功能特性 → **UI 设计理念** →
-     快速开始 → 配置 → 构建 → **工作原理（mermaid 架构图）** → 目录结构 →
-     使用场景 → **常见问题** → **路线图** → 许可证
+   - 导航目录 → 项目简介 → **核心优势（表格）** → 功能特性表 + 参数表 →
+     **UI 设计理念** → **截图演示** → 快速开始 → 配置 → 构建 →
+     **工作原理（mermaid 架构图）** → 目录结构 → **同类差异对比表** →
+     **常见问题（`<details>` 折叠）** → **路线图** → 贡献指南 → 许可证
 3. **注入阶段 1 的研究成果**：把竞品差异化、UI 审美取向写进「核心优势」与「UI 设计理念」章节，
    让 README 既有专业度又有设计感。
-4. 写完后**向用户简要展示关键改动**（核心优势表、UI 理念段落），再进入推送。
+4. **配图**：用无头浏览器（Edge/Chrome `--headless --screenshot`）截本地 HTML 到 `docs/`，
+   用相对路径引用；截完裁掉底部多余留白。
+5. 写完后**向用户简要展示关键改动**（核心优势表、UI 理念段落），再进入推送。
 
 ---
 
@@ -76,22 +85,36 @@ python scripts/push_repo.py \
   --path <项目目录> \
   [--private] \
   [--release v1.0.0] \
-  [--asset <附件路径>] \
+  [--asset <附件1>] [--asset <附件2>] ... \
+  [--release-body-file <md 文件>] \
+  [--description "仓库描述"] [--topics a,b,c] \
   [--message "提交说明"] \
-  [--branch main]
+  [--branch main] \
+  [--allow-binary] [--no-verify]
 ```
 
 ### 脚本已内置的关键处理（详见 `references/notes.md`）
-- 从 `wincred` 读取 token（不落盘）。
-- 仓库不存在则自动 `POST /user/repos` 创建。
-- **空仓库引导**：新建仓库无法直接建 blob（409），先用 Contents API 提交占位建立 `main` 分支。
+- 从 `wincred` 读取 token（不落盘，超时 90 秒）。
+- 仓库不存在则自动 `POST /user/repos` 创建，并可同时设置 `description` 与 `topics`。
+- **空仓库引导**：新建仓库无法直接建 blob（409），先用 Contents API 提交 `.gitkeep` 建立分支，
+  推完再自动清掉占位。
+- **中文路径安全**：`git -c core.quotepath=false ls-files -z` 取文件列表 +
+  "文件必须存在"硬断言 —— 否则中文名文件会被**静默丢弃**（本项目踩过，23 个只上去 9 个）。
+- **`base_tree` 用 tree SHA**（不是 commit SHA），避免 `422 BadObjectState`。
+- **删除已不存在的路径**也会 422，故只有确认远程存在才发删除项。
+- **敏感文件闸门**：命中密钥类关键词一律中止；命中 `.exe/.zip` 等二进制需 `--allow-binary` 显式放行。
 - 通过 Git Data API 推代码：blob → tree → commit → ref（等效标准 `git push`）。
-- 可选 Release + 附件上传（`uploads.github.com`）；附件名统一 ASCII，避免中文乱码。
+- Release 支持多附件、幂等（已存在则复用，附件已上传则跳过）；附件名统一 ASCII，避免中文乱码。
+- **推送后自动核验**：比对本地 git blob sha 与远程 tree 的 blob sha，逐文件报告差异（`--no-verify` 可关）。
 - 仅推送 `git ls-files` 跟踪的文件，**自动尊重 `.gitignore`**，密钥不会进仓库。
 
 ### 推送后必做验证
+- 看脚本末尾的 `[核验]` 区块：应显示「逐字节哈希完全一致 ✓」。
+  若出现「仅本地有」，说明有文件没推上去（优先查中文路径与文件是否存在）；
+  若只有个别文件「哈希不同」，优先查**换行符 CRLF/LF**（见 `references/notes.md` 第七条）。
 - `WebFetch https://raw.githubusercontent.com/<owner>/<repo>/main/README.md` 确认公开可访问、
-  且含新增章节（如「核心优势」「UI 设计理念」）。
+  且含新增章节（如「核心优势」「截图演示」）。
+  **但核验文件树/删除结果不要用 WebFetch**（有约 15 分钟缓存，会返回旧 tree），要直连 API。
 - 同时把更新提交到**本地** git（`git add` + `git commit`），保持本地与远程一致。
 - 清理本回合产生的临时脚本（放在项目目录外，如系统临时目录下的 `_*.py`）。
 
@@ -105,4 +128,4 @@ python scripts/push_repo.py \
 ## 交付物
 - 优化后的 `README.md`（已写入项目目录）
 - 已推送并验证可访问的 GitHub 仓库 / Release（给出地址）
-- 本地 git 已提交，临时文件已清理
+- 本地 git 已提交，临时文件已清理，且已给出「本地 ↔ 远程一致性」核验结论
