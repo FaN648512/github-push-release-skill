@@ -247,10 +247,24 @@ WebFetch 有约 15 分钟结果缓存，会返回*旧*的 tree。核验文件树
 </details>
 
 <details>
-<summary><b><code>git credential fill</code> 卡住不动 / 报找不到凭据？</b></summary>
+<summary><b>老弹出「Select a credential helper」窗口要我选，<code>git credential fill</code> 还会卡住不动？</b></summary>
 
-该命令在无交互环境下偶发长时间阻塞，超时值需给到 90 秒（30 秒会误判成"没凭据"）。
-脚本已按 90 秒处理。
+这是同一个病根：`credential.helper` 是**多值**配置，PortableGit 的 system 级写了
+`helper-selector`，与用户级 helper 叠加成 `[helper-selector, GCM]` 两个候选，
+selector 就弹窗问你要哪个。勾「Always use this from now on」**没用**——它记的名字是
+`manager`，而配置里写的是完整路径，对不上，于是照弹。人不在电脑前时就一直卡到超时。
+
+根治（改用户级 `~/.gitconfig`，别动 PortableGit 的 system 配置）：
+
+```bash
+git config --global --unset-all credential.helper
+git config --global --add credential.helper ""          # 空值 = 清空之前的 helper 列表
+git config --global --add credential.helper '!"<...>/git-credential-manager.exe"'
+```
+
+修复后 `git credential fill` 应在 5 秒内返回（实测 0.5 秒）。脚本侧另有双保险：
+用两个 `-c`（先 `credential.helper=` 清空、再指定唯一 helper），
+因为 `-c credential.helper=X` 只是追加、摘不掉原有项。详见 `references/notes.md` 第 2.1 节。
 </details>
 
 <details>

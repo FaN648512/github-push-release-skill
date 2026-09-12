@@ -28,6 +28,11 @@ agent_created: true
    等关键词一律中止，不可放行。）
 2. **token 可用性**：本机 Windows 凭据管理器（wincred）应已缓存 `github.com` 条目（含 `repo` 权限）。
    推送脚本会自动读取，无需用户提供明文 PAT。若读取失败，再向用户索取 PAT（仅本次内存使用，不落盘）。
+   - **若弹出「Select a credential helper」窗口**：说明 `credential.helper` 被多层配置叠加成了
+     多值（system 的 `helper-selector` + 用户级 helper），selector 在等人工点击，
+     无人值守时会一直卡到超时。按 `references/notes.md` 第 2.1 节做一次性清理
+     （在 `~/.gitconfig` 用空值重置列表、只留一个 helper），**不要**动 PortableGit 的 system 配置。
+   - 脚本侧已内置双 `-c`（先 `credential.helper=` 清空、再指定）作为双保险。
 3. **仓库目标**：确认仓库名（默认从当前项目目录名推断）与可见性（公开/私有）。
    决策可用 AskUserQuestion 向用户确认：仓库名、是否新建、Release 是否含附件、版本标签、
    **二进制文件走 Release 附件还是提交进仓库**。

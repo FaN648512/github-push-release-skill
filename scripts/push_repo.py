@@ -44,22 +44,50 @@ SOFT_RISK_EXTS = (".exe", ".zip", ".7z", ".rar", ".msi", ".dll", ".so",
 def get_token():
     """从 Windows 凭据管理器读取 GitHub token，不落盘。
 
-    注意：`git credential fill` 在无交互环境下偶发长时间阻塞，
-    超时值给足 90 秒（30 秒会误判为"没凭据"）。
+    ⚠️ 必须在 -c 里先用空值 `credential.helper=` 重置 helper 列表，再指定目标 helper。
+
+    原因：git 的 `credential.helper` 是**多值**配置，PortableGit 的 system 级
+    (`etc/gitconfig`) 默认写了一条 `credential.helper = helper-selector`；
+    它与用户级 `~/.gitconfig` 里的 helper 叠加后，列表里就有两个 helper，
+    而 `helper-selector` 会弹出「Select a credential helper」图形窗口等人工点击
+    —— 在无人值守环境会一直卡到超时（这正是"凭据读取偶发超时"的真因，
+    不是网络慢）。
+
+    注意 `-c credential.helper=X` 只是**追加**到列表末尾、不清空原有项，
+    所以必须两个 `-c` 配合（先空值清空、再指定）才能把列表收敛成一个。
+
+    若本机残留了 `credential.helperselector.selected` 且其值与真实 helper 名不匹配，
+    selector 会每次重新弹窗 —— 需要在用户级 ~/.gitconfig 里做一次性清理
+    （把 helper 列表用空值重置后只留一个），详见 references/notes.md 第二节。
     """
-    for helper in ("wincred", "manager-core", "manager", ""):
-        args = (["git", "credential", "fill"] if not helper
-                else ["git", "-c", f"credential.helper={helper}",
-                      "credential", "fill"])
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    for helper in ("wincred", "manager", "manager-core"):
+        args = ["git",
+                "-c", "credential.helper=",          # 先清空，摘掉 system 的 helper-selector
+                "-c", f"credential.helper={helper}",
+                "credential", "fill"]
         try:
             p = subprocess.run(args,
                                input="protocol=https\nhost=github.com\n\n",
-                               capture_output=True, text=True, timeout=90)
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=30, env=env)
         except Exception:
             continue
         for line in p.stdout.splitlines():
             if line.startswith("password="):
                 return line[len("password="):].strip()
+
+    # 兜底：完全不指定 helper，交给本机配置（前提是配置里只剩一个 helper，不会弹窗）
+    try:
+        p = subprocess.run(["git", "credential", "fill"],
+                           input="protocol=https\nhost=github.com\n\n",
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30, env=env)
+    except Exception:
+        return None
+    for line in p.stdout.splitlines():
+        if line.startswith("password="):
+            return line[len("password="):].strip()
     return None
 
 

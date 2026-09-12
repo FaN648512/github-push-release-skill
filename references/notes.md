@@ -16,10 +16,64 @@
 ## 二、token 读取
 
 - 本机 Windows 凭据管理器已缓存 `github.com` 条目（账号如 `FaN648512`，含 `repo` 权限）。
-- 用 `git -c credential.helper=wincred credential fill` 读取，仅内存使用，不落盘。
-- 不要用 `helper-selector`（非交互下随机返回空）。
-- **超时值给足 90 秒**：`git credential fill` 在无交互环境下偶发长时间阻塞，
-  用 30 秒超时会误判成"没有凭据"而退出（实测确有此现象）。
+- 用 `git credential fill` 读取，仅内存使用，不落盘。
+- 给 subprocess 传 `env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}`，避免无 tty 时 git 尝试终端提示。
+
+### ⚠️ 2.1 「Select a credential helper」弹窗 —— 这是"凭据读取偶发超时"的真因
+
+**症状**：每次需要凭据的 git 操作（包括推送脚本）都弹出一个图形窗口
+「CredentialHelperSelector · Select a credential helper」，列出
+`<no helper>` / `manager` / `wincred` 让你选。人在电脑前点掉才继续；
+人不在就**一直卡着直到 subprocess 超时** —— 早期误判为"网络慢 / 凭据读取偶发超时"，
+其实是弹窗在等人工点击。
+
+**根因**：`credential.helper` 是**多值**配置，两个层级各写了一条，叠加成列表：
+
+| 层级 | 文件 | 值 |
+|------|------|-----|
+| system | `PortableGit/versions/<v>/etc/gitconfig` | `helper-selector` |
+| global | `~/.gitconfig` | `!"<...>/git-credential-manager.exe"` |
+
+列表 = `[helper-selector, GCM]`。`helper-selector` 是 GCM 的多 helper 选择器，
+一旦发现可选 helper 不止一个，就弹窗询问。
+
+**为什么勾「Always use this from now on」不管用**：它会写下
+`credential.helperselector.selected = manager`，但真实 helper 配置里写的是
+**完整路径** `!"D:/.../git-credential-manager.exe"`，两者名字对不上，
+selector 下次仍无法确认，于是继续弹。
+
+**根治（改用户级 ~/.gitconfig，不要动 PortableGit 的 system 配置）**：
+git 的官方语义是——**把 `credential.helper` 设为空字符串会清空之前的 helper 列表**。
+利用这一点把 system 那条 `helper-selector` 顶掉：
+
+```bash
+# 1) 备份
+cp ~/.gitconfig ~/.gitconfig.bak_$(date +%Y%m%d)
+
+# 2) 清掉 global 原有项 → 写入空值（重置点）→ 只留一个真实 helper
+git config --global --unset-all credential.helper
+git config --global --add credential.helper ""
+git config --global --add credential.helper \
+  '!"D:/.workbuddy/binaries/PortableGit/versions/1.2.0/mingw64/bin/git-credential-manager.exe"'
+
+# 3) 核对：global 应出现「空行 + 一条路径」
+git config --show-origin --get-all credential.helper
+```
+
+**验证**：跑一次带超时的 `git credential fill`，**应在 5 秒内返回**（实测修复后 0.5 秒，
+修复前会卡到超时）。凭据仍能正常读到 `username=FaN648512` + 40 字符 token。
+
+**脚本侧的双保险（必做）**：`-c credential.helper=X` 只是**追加**到列表末尾、**不清空**
+原有项 —— 所以单靠它摘不掉 system 的 selector。正确写法是两个 `-c`：
+
+```python
+["git",
+ "-c", "credential.helper=",            # 先清空（摘掉 system 的 helper-selector）
+ "-c", f"credential.helper={helper}",   # 再指定唯一 helper
+ "credential", "fill"]
+```
+
+这样即使 ~/.gitconfig 被重装/升级重置，脚本自身也不会弹窗。
 
 ---
 
